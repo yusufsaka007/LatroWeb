@@ -3,3 +3,8 @@
 
 # ignore honeypot
 ./honeypot
+
+build/
+external/
+key/
+bin/

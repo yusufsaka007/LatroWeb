@@ -106,7 +106,11 @@ def redefine_commands(cc_arg):
             print(Fore.RED + "[-] Command list file does not exist")
     else:
         COMMAND_LIST = cc_arg
-    
+
+# Create a dummy ssh key under ./src/key
+def create_ssh_key():
+    pass
+
 def main():
     parser = argparse.ArgumentParser(description="Start a honeypot with the given username and password")
     parser.add_argument("--username", "-u", help="Username of the virtual environment")
