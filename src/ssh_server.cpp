@@ -2,289 +2,233 @@
 
 #include "ssh_server.h"
 
-
-static int cb::auth_password(ssh_session session, const char* user, const char* password, void* userdata){
-    ClientData* pClient = static_cast<ClientData*>(userdata);
-    if (strcmp(pClient->username, user) == 0 && strcmp(pClient->password, password) == 0){
-        std::cout << GREEN << "Login successful"<< RESET << std::endl;
-        pClient->auth = SSH_AUTH_SUCCESS;
-        return SSH_AUTH_SUCCESS;
-    }
-    else{
-        std::cerr << RED << "Failed login attempt: " << user << ":" << password << RED << std::endl;
-        pClient->auth = SSH_AUTH_DENIED;
-        return SSH_AUTH_DENIED;
-    }
-}
-
-static ssh_channel cb::channel_open(ssh_session session, void* userdata) {
-    ClientData* pClient = static_cast<ClientData*>(userdata);
-    std::cout << GREEN << "Channel open request" << RESET << std::endl;
-    pClient->channel = ssh_channel_new(session);
-    return pClient->channel;
-}
-
-static int cb::pty_request(ssh_session session, ssh_channel channel, const char *term, int cols, int rows, int py, int px, void *userdata) {
-    struct ChannelData* pChannel = static_cast<ChannelData*>(userdata);
-    std::cout << GREEN << "PTY request" << RESET << std::endl;
-    (void) session;
-    (void) channel;
-    (void) term;
-
-    pChannel->winsize->ws_row = rows;
-    pChannel->winsize->ws_col = cols;
-    pChannel->winsize->ws_xpixel = px;
-    pChannel->winsize->ws_ypixel = py;
-
-    if (openpty(&pChannel->pty_master, &pChannel->pty_slave, NULL, NULL, pChannel->winsize) != 0) {
-        std::cerr << RED << "Failed to open pty" << RESET << std::endl;
-        return SSH_ERROR;
-    }
-    return SSH_OK;
-}
-
-static int cb::pty_resize(ssh_session session, ssh_channel channel, int cols, int rows, int py, int px, void *userdata){
-    struct ChannelData* pChannel = static_cast<ChannelData*>(userdata);
-    (void) session;
-    (void) channel;
-
-    pChannel->winsize->ws_row = rows;
-    pChannel->winsize->ws_col = cols;
-    pChannel->winsize->ws_xpixel = px;
-    pChannel->winsize->ws_ypixel = py;
-
-    if (pChannel->pty_master != -1) {
-        return ioctl(pChannel->pty_master, TIOCSWINSZ, pChannel->winsize);
-    }
-
-    return SSH_ERROR;
-}
-
-static int cb::data_function(ssh_session session, ssh_channel channel, void *data, uint32_t len, int is_stderr, void *userdata) {
-    struct ChannelData* pChannel = static_cast<ChannelData*>(userdata);
-    (void) session;
-    (void) channel;
-    (void) is_stderr;
-
-    if (len == 0) {
-        std::cerr << RED << "No data received" << RESET << std::endl;
-        return 0;
-    }
-
-    std::cout << GREEN << "Data received: " << std::string(static_cast<char*>(data), len) << RESET << std::endl;
-    return write(pChannel->child_stdin, static_cast<char*>(data), len);
-}
-static int cb::exec_request(ssh_session session, ssh_channel channel,const char *command, void *userdata) {
-    struct ChannelData* pChannel = static_cast<ChannelData*>(userdata);
-
-    (void) session;
-    (void) channel;
-
-    if (pChannel->pty_master == -1 && pChannel->pty_slave == -1) {
-        std::cerr << RED << "PTY not allocated (from exec_request)" << RESET << std::endl;
-        return SSH_ERROR;
-    }
-
-    std::cout << GREEN << "Exec request" << RESET << std::endl;
-    return SSH_OK;
-}
-
-static int cb::shell_request(ssh_session session, ssh_channel channel, void *userdata) {
-    struct ChannelData* pChannel = static_cast<ChannelData*>(userdata);
-
-    (void) session;
-    (void) channel;
-
-    if (pChannel->pty_master == -1 || pChannel->pty_slave == -1) {
-        std::cerr << RED << "PTY not allocated (from shell request)" << RESET << std::endl;
-        return SSH_ERROR;
-    }    
-
-    // Test purpose
-    std::cout << GREEN << "Shell request" << RESET << std::endl;
-    return SSH_OK;
-}
-
-
-SSHServer::SSHServer(const std::string& address, const unsigned int port, const std::string& username, const std::string& password) {
-    address_ = address;
-    port_ = port;
-    username_ = username;
-    password_ = password;
-}
+SSHServer* SSHServer::instance_ = nullptr;
 
 SSHServer::SSHServer() {
-    address_ = DEFAULT_IP;
+    ip_ = DEFAULT_IP;
     port_ = DEFAULT_PORT;
     username_ = DEFAULT_USERNAME;
     password_ = DEFAULT_PASSWORD;
+    shutdown_flag_ = false;
+    instance_ = this;
+}
+
+SSHServer::SSHServer(const char* ip, uint32_t port, const char* username, const char* password) {
+    ip_ = ip;
+    port_ = port;
+    username_ = username;
+    password_ = password;
+    shutdown_flag_ = false;
+    instance_ = this;
 }
 
 SSHServer::~SSHServer() {
     cleanup();
 }
 
-void SSHServer::cleanup() {
-    std::cout << "\n" << YELLOW << "Performing cleanup" << RESET << std::endl;
-    ssh_bind_free(ssh_bind_);
-    ssh_finalize();
+void SSHServer::sigterm_handler(int signum) {
+    if (signum == SIGINT) {
+        instance_->shutdown_flag_ = true;
+    }
+}
+
+void SSHServer::sigchld_handler(int signum) {
+    (void) signum;
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        // Reap all the zombie processes
+    }
+}
+
+void SSHServer::register_signal_handler() {
+    struct sigaction sa;
+
+    // SIGINT handler
+    sa.sa_handler = sigterm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    // SIGCHLD handler
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 }
 
 void SSHServer::set_options() {
-    ssh_bind_ = ssh_bind_new();
-    ssh_bind_options_set(ssh_bind_, SSH_BIND_OPTIONS_LOG_VERBOSITY, &bindVerbosity);
-    ssh_bind_options_set(ssh_bind_, SSH_BIND_OPTIONS_BINDADDR, address_.c_str());
-    ssh_bind_options_set(ssh_bind_, SSH_BIND_OPTIONS_BINDPORT, &port_);
-    ssh_bind_options_set(ssh_bind_, SSH_BIND_OPTIONS_RSAKEY, KEY_FILE);
-    ssh_bind_options_set(ssh_bind_, SSH_BIND_OPTIONS_BANNER, SSH_BANNER.c_str());
+    std::cout << MAGENTA << "[SSHServer::set_options]: Setting the SSH server options" << RESET << std::endl;
+    sshbind_ = ssh_bind_new();
+    if (sshbind_ == NULL) {
+        std::cerr << RED << "[SSHServer::set_options]: ssh_bind_new failed" << RESET << std::endl;
+        return;
+    }
+    ssh_bind_options_set(sshbind_, SSH_BIND_OPTIONS_BINDADDR, ip_.c_str());
+    ssh_bind_options_set(sshbind_, SSH_BIND_OPTIONS_BINDPORT, &port_);
+    ssh_bind_options_set(sshbind_, SSH_BIND_OPTIONS_HOSTKEY, KEY_FILE);
 }
 
+void SSHServer::start() {
+    int rc;
+    std::cout << MAGENTA << "[SSHServer::start]: Starting the SSH server" << RESET << std::endl;
 
-void SSHServer::handle_client(ssh_event event, ssh_session session){
-    int n=0;
-    ssh_message message = nullptr;
-    ssh_channel channel = nullptr;
-    ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &sessionVerbosity);
+    rc = ssh_init();
+    if (rc < 0) {
+        std::cerr << RED << "[SSHServer::start]: ssh_init failed" << RESET << std::endl;
+        return;
+    }
 
-    
-    struct winsize wSize = {
-        .ws_row= 0,
+    rc = ssh_bind_listen(sshbind_);
+    if (rc < 0) {
+        std::cerr << RED << "[SSHServer::start]: " << ssh_get_error(sshbind_) << RESET << std::endl;
+        return;
+    }
+
+    while (shutdown_flag_ == false) {
+        session_ = ssh_new();
+        if (session_ == NULL) {
+            std::cerr << RED << "[SSHServer::start]: Failed to allocate session" << RESET << std::endl;
+            continue;
+        }
+
+        // Block until new connection arises
+        rc = ssh_bind_accept(sshbind_, session_);
+        if (rc != SSH_ERROR) {
+            pthread_t t;
+            rc = pthread_create(&t, NULL, &SSHServer::session_thread_helper, this);
+            if (rc == 0) {
+                pthread_detach(t);
+                threads_.push_back(std::move(t)); 
+                continue;
+            }
+            
+        } else{
+            std::cerr << RED << "[SSHServer::start]: " << ssh_get_error(sshbind_) << RESET << std::endl;
+        }
+    }
+
+    return;
+}
+
+void* SSHServer::session_thread_helper(void* arg) {
+    SSHServer* server = static_cast<SSHServer*>(arg);
+    server->session_thread(server->session_);
+    return nullptr;
+}
+
+void SSHServer::session_thread(ssh_session __s) {
+    ssh_session session = __s;
+    ssh_event event;
+
+    std::cout << MAGENTA << "[SSHServer::session_thread]: Starting a new session thread" << RESET << std::endl;
+    event = ssh_event_new();
+    if (event != NULL) {
+        handle_session(event, session);
+    } else {
+        std::cerr << RED << "[SSHServer::session_thread]: Failed to create event" << RESET << std::endl;
+    }
+    if (session != nullptr) ssh_free(session);
+    if (ssh_is_connected(session)) ssh_disconnect(session);
+}
+
+void SSHServer::handle_session(ssh_event event, ssh_session session) {
+    int n; // Used to give the client 5 seconds before terminating the session
+    int rc = 0;    
+
+    std::cout << BLUE << "[SSHServer::handle_session]: Handling a new session: " << session << RESET << std::endl;
+
+    struct winsize wsize = {
+        .ws_row = 0,
         .ws_col = 0,
         .ws_xpixel = 0,
         .ws_ypixel = 0
     };
 
-    struct ChannelData channelData{
+    struct session_data_struct sdata = {
+        .channel = NULL,
+        .auth_attempts = 0,
+        .authenticated = 0,
+        .username = &username_,
+        .password = &password_
+    };
+
+    struct channel_data_struct cdata = {
+        .pid = 0,
         .pty_master = -1,
         .pty_slave = -1,
         .child_stdin = -1,
         .child_stdout = -1,
         .child_stderr = -1,
-        .event = nullptr,
-        .winsize = &wSize
+        .event = NULL,
+        .winsize = &wsize
     };
 
-    struct ClientData clientData{
-        .username = const_cast<char*>(username_.c_str()),
-        .password = const_cast<char*>(password_.c_str()),
-        .auth = SSH_AUTH_DENIED,
-        .channel = nullptr
-    };
+    struct ssh_server_callbacks_struct server_cb;
+    server_cb.userdata = &sdata;
+    server_cb.auth_password_function = cb::auth_password;
+    server_cb.channel_open_request_session_function = cb::channel_open;
 
-    struct ssh_server_callbacks_struct server_cb = {
-        .userdata = &clientData,
-        .auth_password_function = cb::auth_password,
-        .channel_open_request_session_function = cb::channel_open
-    };
-    
-    struct ssh_channel_callbacks_struct channel_cb = {
-        .userdata = &channelData,
-        .channel_pty_request_function = cb::pty_request,
-        .channel_pty_window_change_function = cb::pty_resize,
-        //.channel_shell_request_function = cb::shell_request,
-        //.channel_exec_request_function = cb::exec_request,
-        //.channel_data_function = cb::data_function,
-    };
+    struct ssh_channel_callbacks_struct channel_cb;
+    channel_cb.userdata = &cdata,
+    channel_cb.channel_pty_request_function = cb::pty_request;
+    channel_cb.channel_pty_window_change_function = cb::pty_resize;
+    channel_cb.channel_shell_request_function = cb::shell_request;
+    channel_cb.channel_exec_request_function = cb::exec_request; // wont be allowed later
+    channel_cb.channel_data_function = cb::data_function;
+
+    ssh_set_auth_methods(session, SSH_AUTH_METHOD_PASSWORD);
 
     ssh_callbacks_init(&server_cb);
+    ssh_callbacks_init(&channel_cb);
+
     ssh_set_server_callbacks(session, &server_cb);
-    ssh_set_auth_methods(session, SSH_AUTH_METHOD_PASSWORD);
-    
+
+    // Key exchange
     if (ssh_handle_key_exchange(session) != SSH_OK) {
-        std::cerr << RED << "Key exchange failed: " << ssh_get_error(session) << RESET << std::endl;
+        std::cerr << RED << "[SSHServer::handle_session]: Key exchange failed: " << ssh_get_error(session) << RESET << std::endl;
         goto cleanup;
     }
-    std::cout << GREEN << "Key exchange successful" << RESET << std::endl;
+    std::cout << GREEN << "[SSHServer::handle_session]: Successful key exchange" << RESET << std::endl;
     
-    message = ssh_message_get(session);
-    
-    std::cout << GREEN << "Client authenticated successfully" << RESET << std::endl;
-
-    
-
-    /*if (clientData.auth != SSH_AUTH_SUCCESS) {
-        std::cerr << RED << "Failed to authenticate user" << RESET << std::endl;
+    rc = ssh_event_add_session(event, session);
+    if (rc != SSH_OK) {
+        std::cerr << RED << "[SSHServer::handle_session]: Failed to add session to event" << RESET << std::endl;
         goto cleanup;
     }
-    std::cout << GREEN << "Client authenticated successfully" << RESET << std::endl;
 
-    if (!ssh_channel_is_open(clientData.channel)) {
-        std::cerr << RED << "Channel is not open" << RESET << std::endl;
-        goto cleanup;
+    // Authentica and open a channel
+    while (sdata.authenticated == 0 || sdata.channel == NULL) {
+        /* To Do! Simulate a successful brute force attempt at random X attempts to make the attacker get inside*/
+        if (sdata.auth_attempts >= 3) {
+            std::cout << YELLOW << "[SSHServer::handle_session]: Auth attempts exceeded" << RESET << std::endl;
+            goto cleanup;
+        }
+        if (ssh_event_dopoll(event, -1) == SSH_ERROR) {
+            std::cerr << RED << "[SSHServer::handle_session]: " << ssh_get_error(session) << RESET << std::endl;
+            goto cleanup;
+        }
     }
-    std::cout << GREEN << "Channel is open" << RESET << std::endl;
-    */
-    // Handle channel requests    
 
-    cleanup:
-        if (channel != nullptr) {
-            ssh_channel_send_eof(channel);
-            ssh_channel_close(channel);
-            ssh_channel_free(channel);
-        }
-        if (session != nullptr && ssh_is_connected(session)) {
-            ssh_disconnect(session);
-            ssh_free(session);
-        }
-        if (message != nullptr){
-            ssh_message_free(message);  
-        }
-        if (event != nullptr){
-            ssh_event_free(event);
-        }
+    std::cout << GREEN << "[SSHServer::handle_session]: Authenticated user" << RESET << std::endl;
+
+cleanup:
+    std::cout << YELLOW << "[SSHServer::handle_session]: Cleaning up the session" << RESET << std::endl;
+    if(ssh_is_connected(session)) ssh_disconnect(session); std::cout << YELLOW << "[SSHServer::handle_session]: Disconnected the session" << RESET << std::endl;
+    if(session != nullptr) ssh_free(session); std::cout << YELLOW << "[SSHServer::handle_session]: Freed the session" << RESET << std::endl;
+    if(event != nullptr) ssh_event_free(event); std::cout << YELLOW << "[SSHServer::handle_session]: Freed the event" << RESET << std::endl;
+    if(cdata.event != nullptr) ssh_event_free(cdata.event); std::cout << YELLOW << "[SSHServer::handle_session]: Freed the sdata event" << RESET << std::endl;
+    if(ssh_channel_is_open(sdata.channel)) ssh_channel_free(sdata.channel); std::cout << YELLOW << "[SSHServer::handle_session]: Freed the channel" << RESET << std::endl;
 }
 
-// Bind to the server and start listening for incoming connections
-// New session will be created for each incoming connection
-// Each session will have thread to function
+void SSHServer::cleanup() {
+    std::cout << MAGENTA << "[SSHServer::cleanup]: Stopping the SSH server" << RESET << std::endl;
+    if (sshbind_ != nullptr) ssh_bind_free(sshbind_); 
+    if (ssh_is_connected) ssh_disconnect(session_);
+    if (session_ != nullptr) ssh_free(session_);
+    ssh_finalize();
 
-void SSHServer::start() {
-    ssh_session session;
-    if (ssh_bind_listen(ssh_bind_) < 0) {
-        std::cerr << RED << "Error: " << ssh_get_error(ssh_bind_) << std::endl;
-        return;
-    } 
-    runServer_ = true;
-    std::cout << BLUE << "\nListening on " << address_ << ":" << port_ << std::endl;
-    std::cout << BLUE << "Credentials: " << username_ << ":" << password_ << std::endl;
-    std::cout << GREEN << "SSH Server started successfully." << RESET << std::endl;
-    session = ssh_new();
-    while (runServer_) {
-        
-        if (session == NULL) {
-            std::cerr << RED << "Failed to allocate session" << RESET << std::endl;
-            continue;
-        }
-
-        if (ssh_bind_accept(ssh_bind_, session) == SSH_ERROR) {
-            std::cerr << RED << "Error accepting connection: " << ssh_get_error(ssh_bind_) << RESET << std::endl;
-            ssh_free(session);
-            continue;
-        }
-        
-        ssh_event event = ssh_event_new();
-        if (event == NULL) {
-            std::cerr << RED << "Failed to create polling context" << RESET << std::endl;
-            ssh_disconnect(session);
-            ssh_free(session);
-            continue;
-        }
-      
-        threads_.emplace_back(&SSHServer::handle_client, this, event, session);
-        
-        //ssh_event_free(event);
-        //ssh_disconnect(session);
-        //ssh_free(session);
+    for (auto& t : threads_) {
+        pthread_join(t, NULL);
     }
-}
 
-// Stop the server
-// Handle threads (avoid memory leaks)
-void SSHServer::stop() {
-    runServer_ = false;
-    for (std::thread& t : threads_) {
-        if (t.joinable()) {
-            t.join(); // Wait for threads to terminate
-        }
-    }
+    return;
 }
