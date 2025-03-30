@@ -8,3 +8,5 @@ build/
 external/
 key/
 bin/
+
+meta.json

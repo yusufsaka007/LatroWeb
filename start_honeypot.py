@@ -4,13 +4,16 @@ import subprocess
 import argparse
 import sys
 from colorama import Fore, Back, Style, init
+import json
 
 init(autoreset=True)
 
 ROOT_FOLDER = "./honeypot"
 FOLDER_LIST = ['lib/x86_64-linux-gnu','lib64','usr/bin','usr/sbin','etc','home','var/www/html']
 COMMAND_LIST = ['ls','cat','bash','passwd','useradd','whoami','hostname']
+JSON_NAME = "meta.json"
 LIB_LIST = []
+metadata = {}
 
 def run_command(command, args):
     try:
@@ -111,6 +114,23 @@ def redefine_commands(cc_arg):
 def create_ssh_key():
     pass
 
+# Modify the json file with the metadata
+def modify_json():
+    if len(metadata) == 0:
+        print(Fore.RED + "[-] Use --help to see the available options")
+        return
+    if os.path.exists(JSON_NAME):
+        with open(JSON_NAME, 'r') as f:
+            data = json.load(f)
+        data.update(metadata)        
+    else:
+        data = metadata
+
+    with open(JSON_NAME, 'w') as f:
+        json.dump(data, f, indent=4)
+        print(Fore.GREEN + f"[+] Changes made on {JSON_NAME}")
+        
+
 def main():
     parser = argparse.ArgumentParser(description="Start a honeypot with the given username and password")
     parser.add_argument("--username", "-u", help="Username of the virtual environment")
@@ -119,7 +139,7 @@ def main():
     parser.add_argument("--custom-folder", "-cf", help="Custom folder to create on top of the ./honeypot. -cf <folder_path> | -cf <folder_path1 folder_path2...> | -cf <folder_list.txt> | e.g -cf bin/new_virtual_folder", nargs="+", required=False)
     parser.add_argument("--custom-command", "-cc", help="Custom command to add to the virtual environment. Custom command list for this flag requires to be in .txt format. Requires the absolute path | -cc <path_to_command> | -cc <path_to_command1 path_to_command2...> | -cc <commands_list.txt> | e.g -cc /bin/bash ", nargs="+", required=False)
     parser.add_argument("--virtual", "-v", help="Enable virtual environment setup (copy commands, libraries, etc.)", action="store_true", default=False)
-
+    parser.add_argument("--json", "-j", help="Create or modify the info container in json format", action="store_true", default=False)
     args = parser.parse_args()
 
     # Check root priviliges
@@ -136,16 +156,13 @@ def main():
         if args.custom_command:
             redefine_commands(args.custom_command) # Change the default COMMAND_LIST
         copy_commands()
-    else:
-        if args.username:
-            if args.password:
-                pass
-            else:
-                pass
-        if args.hostname:
-            pass
-        else:
-            print(Fore.RED + "[-] Invalid syntax. Try -h for help")
-
+    
+    if args.username and args.password:
+        metadata['username'] = args.username
+        metadata['password'] = args.password
+    if args.hostname:
+        metadata['hostname'] = args.hostname
+    if args.json:
+        modify_json()
 if __name__ == '__main__':
     main()
