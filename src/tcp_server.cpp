@@ -147,6 +147,10 @@ void TCPServer::tcp_send(int client_socket, struct BufferChain* buffers, size_t&
         total_bytes -= rc;
     }
 
+    if (total_bytes > 0) {
+        std::cerr << RED << "[TCPServer::tcp_send] Not all data was sent, remaining bytes: " << total_bytes << RESET << std::endl;
+    }
+
 }
 
 void TCPServer::set_brute_force(bool allow, int min, int max) {
@@ -368,9 +372,10 @@ int TCPServer::exec_request(TCPClient* client) {
     
         // Send output to the attacker
         if (out_buffer) {
-            size_t total_bytes_out = get_total_bytes(out_buffer);
+            size_t total_bytes_out = get_total_bytes(out_buffer);            
             tcp_send(client->client_socket, out_buffer, total_bytes_out);
             free_buffer_chain(out_buffer);
+            
         }
 
         // Send error to the attacker
