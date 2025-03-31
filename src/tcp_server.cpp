@@ -130,6 +130,25 @@ void TCPServer::tcp_send(int client_socket, const char* buffer, int size=-1) {
     }
 }
 
+void TCPServer::tcp_send(int client_socket, struct BufferChain* buffers, size_t& total_bytes) {
+    int rc;
+    int bytes_send = 0;
+    struct BufferChain* current = buffers;
+    while (!shutdown_flag_ && bytes_send < total_bytes) {
+        rc = send(client_socket, current->bytes, current->len, 0);
+        if (rc < 0) {
+            throw std::runtime_error(std::string("[TCPServer::tcp_send] Error sending data: ") + strerror(errno));
+        }
+        else if (rc == 0) {
+            throw std::runtime_error(std::string("[TCPServer::tcp_recv] Client disconnected"));
+        }
+        bytes_send += rc;
+        current = current->next;
+        total_bytes -= rc;
+    }
+
+}
+
 void TCPServer::set_brute_force(bool allow, int min, int max) {
     // Create a random number between 50 and 100
     if (min < 0) {
@@ -185,83 +204,221 @@ int TCPServer::server_auth(TCPClient* client) {
     return 0;
 }
 
-void TCPServer::shell_handler(TCPClient* client) {
-    char buffer[MAX_BUFFER_SIZE];
-    ssize_t bytes_read;
+size_t TCPServer::get_total_bytes(struct BufferChain* buffers) {
+    struct BufferChain* current = buffers;
+    size_t count = 0;
 
-    client->pty_master = posix_openpt(O_RDWR | O_NOCTTY);
-    if (client->pty_master < 0 || grantpt(client->pty_master) < 0 || unlockpt(client->pty_master) < 0) {
-        std::cerr << RED << "[TCPServer::shell_handler] Error creating pty: " << strerror(errno) << RESET << std::endl;
-        return;
+    while (current) {
+        count += current->len;
+        current = current->next;
     }
+
+    return count;
+}
+
+void TCPServer::free_buffer_chain(struct BufferChain* buffers) {
+    struct BufferChain* current;
+    struct BufferChain* next;
+    current = buffers;
+
+    while (current != nullptr) {
+        next = current->next;
+        delete current;
+        current = next;
+    }
+}
+
+// *ToDo* make this function non blocking
+struct BufferChain* TCPServer::read_pipe(int fd) {
+    struct BufferChain* buffers;
+    struct BufferChain* current;
+    struct BufferChain* next;
+
+    ssize_t count;
+    ssize_t n, space;
+    char* p;
+
+    buffers = new BufferChain();
+    if (!buffers) {
+        std::cerr << RED << "[TCPServer::read_pipe] Buffer allocation error" << RESET << std::endl;
+        return nullptr;
+    }
+    memset(buffers, 0, sizeof(struct BufferChain));
+    current = buffers;
+    count = 0;
+    space = MAX_BUFFER_SIZE;
+    p = current->bytes;
+    while ((n = read(fd, p, space)) > 0 && !shutdown_flag_) {
+        p += n; count += n; space -= n;
+        if (space == 0) {
+            // New allocation is required
+            next = new BufferChain();
+            if (!next) {
+                std::cerr << RED << "[TCPServer::read_pipe] Buffer allocation error" << RESET << std::endl;
+                return nullptr;
+            }
+            memset(next, 0, sizeof(struct BufferChain));
+            current->len = count;
+            current->next = next;
+            current = next;
+            count = 0;
+            space = MAX_BUFFER_SIZE;
+            p = current->bytes;
+        }
+    }
+    current->len = count;
+    if (n < 0) {
+        std::cerr << RED << "[TCPServer::read_pipe] Error reading from pipe: " << strerror(errno) << RESET << std::endl;
+        free_buffer_chain(buffers);
+        return nullptr;
+    }
+    return buffers;
+}
+
+int TCPServer::exec_request(TCPClient* client) {
+    int* stdin_pipe = client->stdin_pipe;
+    int* stdout_pipe = client->stdout_pipe;
+    int* stderr_pipe = client->stderr_pipe;
+
+    struct BufferChain* out_buffer = nullptr;
+    struct BufferChain* err_buffer = nullptr;
+    struct BufferChain* current = nullptr;
+
+    int rc;
+    int exec_result;
+
+    rc = pipe(stdin_pipe);
+    if (rc < 0) {
+        std::cerr << RED << "[TCPServer::exec_request] Error creating stdin pipe: " << strerror(errno) << RESET << std::endl;
+        goto fail_pipe_stdin;
+    }
+    rc = pipe(stdout_pipe);
+    if (rc < 0) {
+        std::cerr << RED << "[TCPServer::exec_request] Error creating stdout pipe: " << strerror(errno) << RESET << std::endl;
+        goto fail_pipe_stdout;
+    }
+    rc = pipe(stderr_pipe);
+    if (rc < 0) {
+        std::cerr << RED << "[TCPServer::exec_request] Error creating stderr pipe: " << strerror(errno) << RESET << std::endl;
+        goto fail_pipe_stderr;
+    }
+
+    // Handle SIGCHLD
+
+
     client->pid = fork();
     if (client->pid < 0) {
-        std::cerr << RED << "[TCPServer::shell_handler] Fork failed: " << strerror(errno) << RESET << std::endl;
-        close(client->pty_master);
-        return;
+        std::cerr << RED << "[TCPServer::exec_request] Fork failed: " << strerror(errno) << RESET << std::endl;
+        goto cleanup;
     }
-
     if (client->pid == 0) {
         // Child process
-        setsid(); // Detach from the parent terminal
-        client->pty_slave = open(ptsname(client->pty_master), O_RDWR);
-        if (client->pty_slave < 0) {
-            std::cerr << RED << "[TCPServer::shell_handler] Error opening pty slave: " << strerror(errno) << RESET << std::endl;
-            exit(1);
+
+        close(client->client_socket); // Unused duplicate of socket fd
+
+        // Change root directory to the virtual environment (honeypot/)
+
+        // Change workign directory to the virtual environment (honeypot/)
+
+        if (dup2(stdin_pipe[PIPE_READ], STDIN_FILENO) == -1) {
+            std::cerr << RED << "[TCPServer::exec_request] dup2 stdin failed: " << strerror(errno) << RESET << std::endl;    
+        }
+        if (dup2(stdout_pipe[PIPE_WRITE], STDOUT_FILENO) == -1) {
+            std::cerr << RED << "[TCPServer::exec_request] dup2 stdout failed: " << strerror(errno) << RESET << std::endl;    
+        }
+        if (dup2(stderr_pipe[PIPE_WRITE], STDERR_FILENO) == -1) {
+            std::cerr << RED << "[TCPServer::exec_request] dup2 stderr failed: " << strerror(errno) << RESET << std::endl;    
         }
 
-        close(client->pty_master);
+        // Won't be used by the child
+        close(stdin_pipe[PIPE_READ]);
+        close(stdin_pipe[PIPE_WRITE]);
+        close(stdout_pipe[PIPE_READ]);
+        close(stdout_pipe[PIPE_WRITE]);
+        close(stderr_pipe[PIPE_READ]);
+        close(stderr_pipe[PIPE_WRITE]);
+        
+        // *ToDo* Change the shell to the one in the virtual environment
+        // *ToDo* Change the working directory to the one in the virtual environment
+        // *ToDo* Change the root directory to the one in the virtual environment
+        // *ToDo* Add a command white list
+        // *ToDo* Drop privileges if needed
 
-        // Set the pty slave as the controlling terminal
-        if (ioctl(client->pty_slave, TIOCSCTTY, 0) < 0) {
-            std::cerr << RED << "[TCPServer::shell_handler] Error setting pty as controlling terminal: " << strerror(errno) << RESET << std::endl;
-            exit(1);
+        // Sanitize and prepare the command        
+        const char* args[] = {SHELL_BIN, SHELL_ARG, client->command_request, nullptr};
+        exec_result = execve(SHELL_BIN, const_cast<char* const*>(args), nullptr);
+
+        // If we reach here, execve failed
+        std::cerr << RED << "[TCPServer::exec_request] execve failed: " << strerror(errno) << RESET << std::endl;
+        _exit(EXIT_FAILURE);
+    } else {
+        // Parent process
+        close(stdin_pipe[PIPE_READ]);
+        close(stdout_pipe[PIPE_WRITE]);
+        close(stderr_pipe[PIPE_WRITE]);
+
+        // Write the command to the stdin pipe
+        write(stdin_pipe[PIPE_WRITE], client->command_request, client->command_request_len);
+        
+        // Read output
+        out_buffer = read_pipe(stdout_pipe[PIPE_READ]);
+
+        // Read error
+        err_buffer = read_pipe(stderr_pipe[PIPE_READ]);
+    
+        // Send output to the attacker
+        if (out_buffer) {
+            size_t total_bytes_out = get_total_bytes(out_buffer);
+            tcp_send(client->client_socket, out_buffer, total_bytes_out);
+            free_buffer_chain(out_buffer);
         }
 
-        // Redirect input and output to the pty slave
-        dup2(client->pty_slave, STDIN_FILENO);
-        dup2(client->pty_slave, STDOUT_FILENO);
-        dup2(client->pty_slave, STDERR_FILENO);
-        close(client->pty_slave);
-
-        // Launch a shell
-        execl("/bin/bash", "bash", NULL);
-        std::cerr << RED << "[TCPServer::shell_handler] Error launching shell: " << strerror(errno) << RESET << std::endl;
-        exit(1);
+        // Send error to the attacker
+        if (err_buffer) {
+            size_t total_bytes_err = get_total_bytes(err_buffer);
+            tcp_send(client->client_socket, err_buffer, total_bytes_err);
+            free_buffer_chain(err_buffer);
+        }
     }
 
-    // Parent process. Handle communication
+cleanup:
+    close(stderr_pipe[PIPE_READ]);
+    close(stderr_pipe[PIPE_WRITE]);
+fail_pipe_stderr:
+    close(stdout_pipe[PIPE_READ]);
+    close(stdout_pipe[PIPE_WRITE]);
+fail_pipe_stdout:
+    close(stdin_pipe[PIPE_READ]);
+    close(stdin_pipe[PIPE_WRITE]);
+fail_pipe_stdin:
+    return 0;
+}
+
+void TCPServer::handle_shell(TCPClient* client) {
+    ssize_t bytes_read;
+    int rc;
+    char* buffer = client->command_request;
     
-    client->stdin_fd = client->pty_master;
-    client->stdout_fd = client->pty_master;
-    client->stderr_fd = client->pty_master;
-    
-    try {
+    try{
         while (!shutdown_flag_) {
-            bytes_read = read(client->stdout_fd, buffer, sizeof(buffer) - 1);
-            if (bytes_read < 0) {
-                if (errno == EINTR) {
-                    // Interrupted by signal, check if shutdown_flag_ is set
-                    continue;
+            tcp_recv(client->client_socket, buffer, MAX_BUFFER_SIZE, &bytes_read);
+            if (bytes_read > 0) {
+                buffer[bytes_read] = '\0';
+                std::cout << BLUE << "[TCPServer::handle_shell] Command from client " << client->ip << ": " << buffer << RESET << std::endl;
+                
+                client->command_request_len = bytes_read;                
+                
+                if (strncmp(buffer, "exit", 4) == 0) {
+                    std::cout << GREEN << "[TCPServer::handle_shell] Client " << client->ip << " exited the shell" << RESET << std::endl;
+                    break;
                 }
-                std::cerr << RED << "[TCPServer::shell_handler] Error reading from pty: " << strerror(errno) << RESET << std::endl;
-                break;
+
+                // Execute the command
+                rc = exec_request(client);
+                if (rc < 0) {
+                    tcp_send(client->client_socket, "Error executing command\n");
+                }
             }
-            else if (bytes_read == 0) {
-                std::cout << YELLOW << "[TCPServer::shell_handler] Shell closed" << RESET << std::endl;
-                break;
-            }
-            buffer[bytes_read] = '\0';
-            
-            // Log the command/output
-            std::cout << GREEN << "[TCPServer::shell_handler] Output: " << buffer << RESET << std::endl;
-        
-            tcp_send(client->client_socket, buffer, bytes_read);
-    
-            tcp_recv(client->client_socket, buffer, sizeof(buffer) - 1, &bytes_read);
-            buffer[bytes_read] = '\0';
-            std::cout << GREEN << "[TCPServer::shell_handler] Received command: " << buffer << RESET << std::endl;
-            write(client->stdin_fd, buffer, bytes_read);
         }
     }
     catch(const std::exception& e) { // Catch the exception from tcp_recv and tcp_send
@@ -269,9 +426,18 @@ void TCPServer::shell_handler(TCPClient* client) {
     }
 
     if (client->pid > 0) {
-        kill(client->pid, SIGKILL);
-        waitpid(client->pid, NULL, 0);
-        close(client->pty_master);
+        int status;
+        pid_t result = waitpid(client->pid, &status, 0);
+        if (result == 0) {
+            // Child is still running, send SIGKILL
+            kill(client->pid, SIGKILL);
+            waitpid(client->pid, NULL, 0);
+        } else if (result > 0) {
+            // Child has already terminated, no need to send SIGKILL
+            std::cout << GREEN << "[TCPServer::handle_shell] Child process terminated normally" << RESET << std::endl;
+        } else {
+            std::cerr << RED << "[TCPServer::handle_shell] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
+        }
     }
 }
 
@@ -288,7 +454,7 @@ void TCPServer::handle_client(TCPClient* client) {
         if (rc <= 0) goto cleanup;
 
         // Shell phase
-        shell_handler(client);
+        handle_shell(client);
     }
     catch(const std::exception& e) {
         std::cerr << RED << e.what() << RESET << std::endl;
@@ -300,6 +466,7 @@ cleanup:
         kill(client->pid, SIGKILL);
         waitpid(client->pid, NULL, 0);
     }
+
     cleanup_client(client);
 
     {
@@ -377,22 +544,25 @@ void TCPServer::cleanup_client(TCPClient* client) {
     if (client->pty_slave >=0) {
         close(client->pty_slave);
     }
-    if (client->stdin_fd >= 0) {
-        close(client->stdin_fd);
+    
+    int* pipe = client->stdin_pipe;
+    for (int i=0; i<3; i++) {
+        for (int j=0; j<2; j++) {
+            if (pipe[j] >= 0) {
+                close(pipe[j]);
+            }
+            pipe[j] = -1;
+        }
+        pipe += 2;
     }
-    if (client->stdout_fd >= 0) {
-        close(client->stdout_fd);
-    }
-    if (client->stderr_fd >= 0) {
-        close(client->stderr_fd);
-    }
+
     client->pid = -1;
     client->client_socket = -1;
     client->pty_master = -1;
     client->pty_slave = -1;
-    client->stdin_fd = -1;
-    client->stdout_fd = -1;
-    client->stderr_fd = -1;
+    client->stdin_pipe[PIPE_READ] = client->stdin_pipe[PIPE_WRITE] = -1; 
+    client->stdout_pipe[PIPE_READ] = client->stdout_pipe[PIPE_WRITE] = -1;
+    client->stderr_pipe[PIPE_READ] = client->stderr_pipe[PIPE_WRITE] = -1;
     client->authenticated = 0;
     client->ip = "";
     client->addr_len = 0;
@@ -446,6 +616,11 @@ int TCPServer::cleanup() {
     if (server_fd_ > 0) {
         close(server_fd_);
     }
+
+    for (int i=0; i<max_connections_; i++) {
+        cleanup_client(&clients_[i]);
+    }
+
     if (clients_) {
         delete[] clients_;
         clients_ = nullptr;
@@ -453,4 +628,3 @@ int TCPServer::cleanup() {
 
     return 1;
 }
-
