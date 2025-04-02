@@ -132,7 +132,7 @@ def modify_json():
         
 
 def main():
-    parser = argparse.ArgumentParser(description="Start a honeypot with the given username and password")
+    parser = argparse.ArgumentParser(description="Start a honeypot with the given username and password. Configure the virtual system as well as the log system")
     parser.add_argument("--username", "-u", help="Username of the virtual environment")
     parser.add_argument("--password", "-p", help="Password of the virtual environment")
     parser.add_argument("--hostname", "-hn", help="Computer name/hostname of the virtual environment")
@@ -164,5 +164,7 @@ def main():
         metadata['hostname'] = args.hostname
     if args.json:
         modify_json()
+    # Create a Logs folder which will store all of the log files for each attacker
+    create_folder('Logs')
 if __name__ == '__main__':
     main()
