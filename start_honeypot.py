@@ -140,6 +140,7 @@ def main():
     parser.add_argument("--custom-command", "-cc", help="Custom command to add to the virtual environment. Custom command list for this flag requires to be in .txt format. Requires the absolute path | -cc <path_to_command> | -cc <path_to_command1 path_to_command2...> | -cc <commands_list.txt> | e.g -cc /bin/bash ", nargs="+", required=False)
     parser.add_argument("--virtual", "-v", help="Enable virtual environment setup (copy commands, libraries, etc.)", action="store_true", default=False)
     parser.add_argument("--json", "-j", help="Create or modify the info container in json format", action="store_true", default=False)
+
     args = parser.parse_args()
 
     # Check root priviliges
@@ -166,5 +167,6 @@ def main():
         modify_json()
     # Create a Logs folder which will store all of the log files for each attacker
     create_folder('Logs')
+    
 if __name__ == '__main__':
     main()

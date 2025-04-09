@@ -13,7 +13,7 @@ set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
 set(BIN_DIR ${CMAKE_SOURCE_DIR}/bin)
 set(KEY_FILE ${CMAKE_SOURCE_DIR}/src/key/dummy_rsa_key)
 set(JSON_FILE ${CMAKE_SOURCE_DIR}/meta.json)
-set(LOG_DIR ${CMAKE_SOURCE_DIR}/Logs)
+set(LOG_DIR ${CMAKE_SOURCE_DIR}/Logs/)
 
 #set(LIBSSH_LIBRARY "/usr/lib/x86_64-linux-gnu/libssh.so")
 set(NLOHMANN_JSON_DIR "/usr/local/include/nlohmann")
