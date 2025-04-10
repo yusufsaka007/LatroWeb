@@ -27,6 +27,7 @@ TCP Server
 #include <sys/wait.h>
 #include "login_parser.hpp"
 #include "color_codes.hpp"
+#include "logger.hpp"
 
 #define DEFAULT_PORT 2222
 #define DEFAULT_IP "0.0.0.0"
@@ -59,6 +60,7 @@ struct TCPClient {
     int authenticated;
     char command_request[MAX_BUFFER_SIZE + 1];
     uint8_t command_request_len;
+    Logger* logger;
 };
 
 class TCPServer {

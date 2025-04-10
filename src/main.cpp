@@ -18,7 +18,7 @@ static void temp_sigterm_handler(int signum) {
     runProgram = false;
 }
 
-/*int main(int argc, char* argv[]) {   
+int main(int argc, char* argv[]) {   
     std::ifstream file = js::get_file();
     if(!file.is_open()) {
         std::cerr << RED << "[main] File not found or bad file: " << JSON_FILE << RESET << std::endl;
@@ -53,37 +53,5 @@ static void temp_sigterm_handler(int signum) {
     server->start();
 
     
-    return 0;
-}
-
-*/
-
-// Testing the logger class
-#include "logger.hpp"
-int main() {
-    struct sigaction sa;
-    sa.sa_handler = sigterm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-
-    std::string test_ip = "192.168.0.100";
-    Logger logger(test_ip.c_str());
-    
-    std::string command;
-
-    while ((command != "q" || command != "exit" || command != "quit") && runProgram) {
-        std::cout << "Enter a command (or 'q' to quit): ";
-        std::getline(std::cin, command);
-        
-        if (command == "q" || command == "exit" || command == "quit") {
-            break;
-        }
-        
-        logger.log_command(command.c_str());
-    }
-
     return 0;
 }

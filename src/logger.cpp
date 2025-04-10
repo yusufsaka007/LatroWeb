@@ -2,6 +2,8 @@
 
 #include "logger.hpp"
 
+std::mutex Logger::meta_mutex_;
+
 void replace_delimeter(char* __target, size_t __size) {
     char* p = __target;
     char* p_end = __target + __size - 1;
@@ -21,6 +23,15 @@ Logger::Logger(const char* __p_ip) {
     // Default options
     strncpy(date_format_, "%Y/%m/%d", sizeof(date_format_));
     strncpy(time_format_, "%H:%M:%S", sizeof(time_format_));
+
+    // Initialize logs
+    for (int i = 0; i < LOG_LIMIT; i++) {
+        logs[i] = "";
+    }
+
+    total_logs_ = 0;
+    bzero(time_buffer_, sizeof(time_buffer_));
+    target_file_name_ = "";
 
     // Check LOG_DIR
     if (!std::filesystem::exists(LOG_DIR)) {
@@ -53,6 +64,7 @@ Logger::Logger(const char* __p_ip) {
         std::cerr << GREEN << "[Logger::Logger] Target found in JSON file" << RESET << std::endl;
         target_file_name_ = json_obj["targets"][ip];
     } else {
+        std::lock_guard<std::mutex> lock(meta_mutex_);
         std::cerr << YELLOW << "[Logger::Logger] Adding new target" << RESET << std::endl;
         target_file_name_ = LOG_DIR + std::to_string(json_obj["targets"].size() + 1) + ".log";
         json_obj["targets"][ip] = target_file_name_;
@@ -136,17 +148,21 @@ int Logger::flush_logs() {
         return -1;
     }
     for (int i = 0; i < total_logs_; i++) {
+        if (logs[i].empty()) {
+            continue;
+        }
         target_file_ << logs[i] << std::endl;
     }
     target_file_.close();
     total_logs_ = 0;
-    return 1;
+    return 0;
 }
 
 int Logger::log_command(const char* command) {
     int rc = 0;
     get_date();
-    std::string log_entry = "[" + std::string(time_buffer_) + "]" + command;
+    std::string log_entry = "[" + std::string(time_buffer_) + "] " + command;
+    log_entry.erase(log_entry.find_last_not_of("\n\r\t") + 1);
     if (total_logs_ < LOG_LIMIT) {
         logs[total_logs_] = log_entry;
     } else {
@@ -164,9 +180,8 @@ int Logger::log_command(const char* command) {
 }
 void Logger::get_date() {
     time_t current_time = time(NULL);
-    struct tm* time_info = localtime(&current_time);
+    localtime_r(&current_time, &timeinfo_);
 
     combined_format_ = (std::string) date_format_ + " " + (std::string) time_format_;
-
-    strftime(time_buffer_, sizeof(time_buffer_), combined_format_.c_str(), time_info);
+    strftime(time_buffer_, sizeof(time_buffer_), combined_format_.c_str(), &timeinfo_);
 }

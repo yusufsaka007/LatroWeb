@@ -410,7 +410,7 @@ void TCPServer::handle_shell(TCPClient* client) {
             if (bytes_read > 0) {
                 buffer[bytes_read] = '\0';
                 std::cout << BLUE << "[TCPServer::handle_shell] Command from client " << client->ip << ": " << buffer << RESET << std::endl;
-                
+                client->logger->log_command(buffer);
                 client->command_request_len = bytes_read;                
                 
                 if (strncmp(buffer, "exit", 4) == 0) {
@@ -511,6 +511,7 @@ int TCPServer::tcp_accept() {
                 client->client_socket = client_fd;
                 client->addr_len = client_addr_len;
                 client->ip = inet_ntoa(client_addr.sin_addr);
+                client->logger = new Logger(client->ip.c_str());
                 client->index = i;
                 clients_[i] = *client;
                 slot_found = true;

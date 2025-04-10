@@ -8,6 +8,7 @@
 #include <ctime>
 #include <nlohmann/json.hpp>
 #include <filesystem>
+#include <mutex>
 
 #define DATE_FORMAT 0b00000001
 #define TIME_FORMAT 0b00000010
@@ -39,9 +40,11 @@ private:
     char date_format_[16];
     char time_format_[16];
     std::string combined_format_;
-    char time_buffer_[16];
+    char time_buffer_[32];
     int total_logs_;
     std::string logs[LOG_LIMIT];
+    static std::mutex meta_mutex_;
+    struct tm timeinfo_;
 };
 
 
