@@ -13,6 +13,7 @@
 namespace js{
     std::ifstream get_file();
     int get_value(std::string& username, const std::string search);
+    int get_value(int& buffer, const std::string search);
 }
 
 #endif // LOGIN_PARSER_HPP

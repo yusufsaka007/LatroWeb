@@ -27,6 +27,10 @@ TCPServer::TCPServer() {
     rc = js::get_value(username_, "username");
     rc = js::get_value(password_, "password");
     rc = js::get_value(hostname_, "hostname");
+    rc = js::get_value(uid_, "uid");
+    rc = js::get_value(gid_, "gid");
+
+    shell_prompt_ = BLUE + username_ + "@" + hostname_ + ":~$ " + RESET;
 
     if (rc == 0) {
         std::cerr << RED << "[TCPServer::TCPServer] Error getting values from JSON file" << RESET << std::endl;
@@ -321,17 +325,38 @@ int TCPServer::exec_request(TCPClient* client) {
         close(client->client_socket); // Unused duplicate of socket fd
 
         // Change root directory to the virtual environment (honeypot/)
+        if (chroot(VIRTUAL_HONEYPOT_DIR) != 0) {
+            std::cerr << RED << "[TCPServer::exec_request] chroot failed: " << strerror(errno) << RESET << std::endl;
+            _exit(EXIT_FAILURE);
+        }
+        // Change working directory to the virtual environment (honeypot/)
+        std::string home_dir = "/home/" + username_;
+        if (chdir(home_dir.c_str()) != 0) {
+            std::cerr << RED << "[TCPServer::exec_request] chdir failed: " << strerror(errno) << RESET << std::endl;
+            _exit(EXIT_FAILURE);
+        }
 
-        // Change workign directory to the virtual environment (honeypot/)
+        // Drop priviliges
+        if (setgid(gid_) != 0) {
+            std::cerr << RED << "[TCPServer::exec_request] setgid failed: " << strerror(errno) << RESET << std::endl;
+            _exit(EXIT_FAILURE);
+        }
+        if (setuid(uid_) != 0) {
+            std::cerr << RED << "[TCPServer::exec_request] setuid failed: " << strerror(errno) << RESET << std::endl;
+            _exit(EXIT_FAILURE);
+        }
 
         if (dup2(stdin_pipe[PIPE_READ], STDIN_FILENO) == -1) {
             std::cerr << RED << "[TCPServer::exec_request] dup2 stdin failed: " << strerror(errno) << RESET << std::endl;    
+            _exit(EXIT_FAILURE);
         }
         if (dup2(stdout_pipe[PIPE_WRITE], STDOUT_FILENO) == -1) {
             std::cerr << RED << "[TCPServer::exec_request] dup2 stdout failed: " << strerror(errno) << RESET << std::endl;    
+            _exit(EXIT_FAILURE);
         }
         if (dup2(stderr_pipe[PIPE_WRITE], STDERR_FILENO) == -1) {
             std::cerr << RED << "[TCPServer::exec_request] dup2 stderr failed: " << strerror(errno) << RESET << std::endl;    
+            _exit(EXIT_FAILURE);
         }
 
         // Won't be used by the child
@@ -353,7 +378,6 @@ int TCPServer::exec_request(TCPClient* client) {
         exec_result = execve(SHELL_BIN, const_cast<char* const*>(args), nullptr);
 
         // If we reach here, execve failed
-        std::cerr << RED << "[TCPServer::exec_request] execve failed: " << strerror(errno) << RESET << std::endl;
         _exit(EXIT_FAILURE);
     } else {
         // Parent process
@@ -375,7 +399,6 @@ int TCPServer::exec_request(TCPClient* client) {
             size_t total_bytes_out = get_total_bytes(out_buffer);            
             tcp_send(client->client_socket, out_buffer, total_bytes_out);
             free_buffer_chain(out_buffer);
-            
         }
 
         // Send error to the attacker
@@ -406,6 +429,7 @@ void TCPServer::handle_shell(TCPClient* client) {
     
     try{
         while (!shutdown_flag_) {
+            tcp_send(client->client_socket, shell_prompt_.c_str(), shell_prompt_.size());
             tcp_recv(client->client_socket, buffer, MAX_BUFFER_SIZE, &bytes_read);
             if (bytes_read > 0) {
                 buffer[bytes_read] = '\0';
@@ -419,10 +443,7 @@ void TCPServer::handle_shell(TCPClient* client) {
                 }
 
                 // Execute the command
-                rc = exec_request(client);
-                if (rc < 0) {
-                    tcp_send(client->client_socket, "Error executing command\n");
-                }
+                exec_request(client);
             }
         }
     }

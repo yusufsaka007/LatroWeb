@@ -37,7 +37,7 @@ TCP Server
 #define PIPE_READ 0
 #define PIPE_WRITE 1
 
-#define SHELL_BIN "/bin/sh" // Replace with the path to the shell in the virtual environment
+#define SHELL_BIN "/bin/bash" // Replace with the path to the shell in the virtual environment
 #define SHELL_ARG "-c"
 
 struct BufferChain {
@@ -92,6 +92,9 @@ private:
     std::string username_;
     std::string password_;
     std::string hostname_;
+    std::string shell_prompt_;
+    int uid_;
+    int gid_;
     int server_fd_;
     struct sockaddr_in server_addr_;
     std::atomic<bool> shutdown_flag_ = true;
