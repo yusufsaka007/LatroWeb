@@ -25,6 +25,7 @@ TCP Server
 #include <pty.h>
 #include <utmp.h>
 #include <sys/wait.h>
+#include <limits.h>
 #include "login_parser.hpp"
 #include "color_codes.hpp"
 #include "logger.hpp"
@@ -61,6 +62,7 @@ struct TCPClient {
     char command_request[MAX_BUFFER_SIZE + 1];
     uint8_t command_request_len;
     Logger* logger;
+    std::string current_dir;
 };
 
 class TCPServer {
@@ -86,6 +88,7 @@ public:
     struct BufferChain* read_pipe(int fd);
     void free_buffer_chain(struct BufferChain* buffers);
     size_t get_total_bytes(struct BufferChain* buffers);
+    void trim_newline(char* str, ssize_t& len);
 private:    
     uint32_t port_; 
     std::string ip_;

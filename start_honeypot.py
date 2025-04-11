@@ -188,7 +188,7 @@ def main():
     parser.add_argument("--username", "-u", help="Username of the virtual environment")
     parser.add_argument("--password", "-p", help="Password of the virtual environment")
     parser.add_argument("--hostname", "-hn", help="Computer name/hostname of the virtual environment")
-    parser.add_argument("--custom-dir", "-cf", help="Custom dir to create on top of the ./honeypot. -cf <dir_path> | -cf <dir_path1 dir_path2...> | -cf <dir_list.txt> | e.g -cf bin/new_virtual_dir", nargs="+", required=False)
+    parser.add_argument("--custom-dir", "-cd", help="Custom dir to create on top of the ./honeypot. -cf <dir_path> | -cf <dir_path1 dir_path2...> | -cf <dir_list.txt> | e.g -cf bin/new_virtual_dir", nargs="+", required=False)
     parser.add_argument("--custom-command", "-cc", help="Custom command to add to the virtual environment. Custom command list for this flag requires to be in .txt format. Requires the absolute path | -cc <path_to_command> | -cc <path_to_command1 path_to_command2...> | -cc <commands_list.txt> | e.g -cc /bin/bash ", nargs="+", required=False)
     parser.add_argument("--virtual", "-v", help="Enable virtual environment setup (copy commands, libraries, etc.)", action="store_true", default=False)
     parser.add_argument("--json", "-j", help="Create or modify the info container in json format", action="store_true", default=False)

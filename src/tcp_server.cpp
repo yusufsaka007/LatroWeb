@@ -44,12 +44,19 @@ TCPServer::TCPServer() {
 
 int TCPServer::init() {
     int rc;
-    
+    int opt=1;
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd_ < 0) {
         std::cerr << "[TCPServer::init] Error creating socket" << std::endl;
         return 0;
     }
+
+    rc = setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (rc < 0) {
+        std::cerr << RED << "[TCPServer::init] Error setting SO_REUSEADDR: " << strerror(errno) << RESET << std::endl;
+        return 0;
+    }
+
     server_addr_.sin_family = AF_INET;
     server_addr_.sin_port = htons(port_);
     rc = inet_pton(AF_INET, ip_.c_str(), &server_addr_.sin_addr);
@@ -287,6 +294,7 @@ int TCPServer::exec_request(TCPClient* client) {
     int* stdin_pipe = client->stdin_pipe;
     int* stdout_pipe = client->stdout_pipe;
     int* stderr_pipe = client->stderr_pipe;
+    int dir_update_pipe[2];
 
     struct BufferChain* out_buffer = nullptr;
     struct BufferChain* err_buffer = nullptr;
@@ -311,8 +319,11 @@ int TCPServer::exec_request(TCPClient* client) {
         goto fail_pipe_stderr;
     }
 
-    // Handle SIGCHLD
-
+    rc = pipe(dir_update_pipe);
+    if (rc < 0) {
+        std::cerr << RED << "[TCPServer::exec_request] Error creating dir update pipe: " << strerror(errno) << RESET << std::endl;
+        goto fail_pipe_dir_update;
+    }
 
     client->pid = fork();
     if (client->pid < 0) {
@@ -321,59 +332,79 @@ int TCPServer::exec_request(TCPClient* client) {
     }
     if (client->pid == 0) {
         // Child process
-
+        client->logger = nullptr; // Prevent access
         close(client->client_socket); // Unused duplicate of socket fd
-
-        // Change root directory to the virtual environment (honeypot/)
-        if (chroot(VIRTUAL_HONEYPOT_DIR) != 0) {
-            std::cerr << RED << "[TCPServer::exec_request] chroot failed: " << strerror(errno) << RESET << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-        // Change working directory to the virtual environment (honeypot/)
-        std::string home_dir = "/home/" + username_;
-        if (chdir(home_dir.c_str()) != 0) {
-            std::cerr << RED << "[TCPServer::exec_request] chdir failed: " << strerror(errno) << RESET << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-
-        // Drop priviliges
-        if (setgid(gid_) != 0) {
-            std::cerr << RED << "[TCPServer::exec_request] setgid failed: " << strerror(errno) << RESET << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-        if (setuid(uid_) != 0) {
-            std::cerr << RED << "[TCPServer::exec_request] setuid failed: " << strerror(errno) << RESET << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-
-        if (dup2(stdin_pipe[PIPE_READ], STDIN_FILENO) == -1) {
-            std::cerr << RED << "[TCPServer::exec_request] dup2 stdin failed: " << strerror(errno) << RESET << std::endl;    
-            _exit(EXIT_FAILURE);
-        }
-        if (dup2(stdout_pipe[PIPE_WRITE], STDOUT_FILENO) == -1) {
-            std::cerr << RED << "[TCPServer::exec_request] dup2 stdout failed: " << strerror(errno) << RESET << std::endl;    
-            _exit(EXIT_FAILURE);
-        }
-        if (dup2(stderr_pipe[PIPE_WRITE], STDERR_FILENO) == -1) {
-            std::cerr << RED << "[TCPServer::exec_request] dup2 stderr failed: " << strerror(errno) << RESET << std::endl;    
-            _exit(EXIT_FAILURE);
-        }
-
-        // Won't be used by the child
-        close(stdin_pipe[PIPE_READ]);
         close(stdin_pipe[PIPE_WRITE]);
         close(stdout_pipe[PIPE_READ]);
-        close(stdout_pipe[PIPE_WRITE]);
         close(stderr_pipe[PIPE_READ]);
-        close(stderr_pipe[PIPE_WRITE]);
-        
-        // *ToDo* Change the shell to the one in the virtual environment
-        // *ToDo* Change the working directory to the one in the virtual environment
-        // *ToDo* Change the root directory to the one in the virtual environment
-        // *ToDo* Add a command white list
-        // *ToDo* Drop privileges if needed
+        close(dir_update_pipe[PIPE_READ]);
 
-        // Sanitize and prepare the command        
+        auto clean_exit = [&](int code) {
+            close(dir_update_pipe[PIPE_WRITE]);
+            if (stdin_pipe[PIPE_READ] != -1) {
+                close(stdin_pipe[PIPE_READ]);
+            }
+            if (stdout_pipe[PIPE_WRITE] != -1) {
+                close(stdout_pipe[PIPE_WRITE]);
+            }
+            if (stderr_pipe[PIPE_WRITE] != -1) {
+                close(stderr_pipe[PIPE_WRITE]);
+            }
+            _exit(code);
+        };
+        
+        // Where the virtualization happens and permissions are set
+        if (chroot(VIRTUAL_HONEYPOT_DIR) != 0) clean_exit(EXIT_FAILURE);
+        if (chdir(client->current_dir.c_str()) != 0) clean_exit(EXIT_FAILURE);
+        if (setgid(gid_) != 0) clean_exit(EXIT_FAILURE);
+        if (setuid(uid_) != 0) clean_exit(EXIT_FAILURE);
+
+        if (dup2(stdin_pipe[PIPE_READ], STDIN_FILENO) < 0) clean_exit(EXIT_FAILURE);
+        if (dup2(stdout_pipe[PIPE_WRITE], STDOUT_FILENO) < 0) clean_exit(EXIT_FAILURE);
+        if (dup2(stderr_pipe[PIPE_WRITE], STDERR_FILENO) < 0) clean_exit(EXIT_FAILURE);
+
+        close(stdin_pipe[PIPE_READ]);
+        close(stdout_pipe[PIPE_WRITE]);
+        close(stderr_pipe[PIPE_WRITE]);
+
+        if (client->command_request_len > MAX_BUFFER_SIZE) {
+            std::cerr << "Command limit passed" << std::endl;
+            clean_exit(EXIT_FAILURE);
+        }
+
+        if (strncmp(client->command_request, "cd", 2) == 0) {
+            if (client->command_request[2] == '\0' || strncmp(client->command_request, "cd ~", 4) == 0) {
+                chdir("/");
+                char cwd[PATH_MAX];
+                if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+                    write(dir_update_pipe[PIPE_WRITE], cwd, strlen(cwd));
+                }
+                clean_exit(EXIT_SUCCESS);
+            } else if (client->command_request[2] == ' ' && client->command_request[3] != '\0') {
+                char target_dir[PATH_MAX];
+                strncpy(target_dir, client->command_request + 3, client->command_request_len - 3);
+                if (chdir(target_dir) != 0) {
+                    std::cout << YELLOW << "[DEBUG] Fail chdir to " << target_dir << RESET << std::endl;
+                    std::cerr << strerror(errno) << std::endl;
+                    clean_exit(EXIT_FAILURE);
+                }
+
+                char cwd[PATH_MAX];
+                if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+                    std::cout << YELLOW << "[DEBUG] " << cwd << RESET << std::endl;
+                    write(dir_update_pipe[PIPE_WRITE], cwd, strlen(cwd));
+                }
+                
+                clean_exit(EXIT_SUCCESS);
+                
+            } else {
+                std::cerr << "Invalid cd command" << std::endl;
+                clean_exit(EXIT_FAILURE);
+            }
+        }
+
+        // Command is something else. Sanitize and prepare the command        
+        close(dir_update_pipe[PIPE_WRITE]);
         const char* args[] = {SHELL_BIN, SHELL_ARG, client->command_request, nullptr};
         exec_result = execve(SHELL_BIN, const_cast<char* const*>(args), nullptr);
 
@@ -384,9 +415,23 @@ int TCPServer::exec_request(TCPClient* client) {
         close(stdin_pipe[PIPE_READ]);
         close(stdout_pipe[PIPE_WRITE]);
         close(stderr_pipe[PIPE_WRITE]);
+        close(dir_update_pipe[PIPE_WRITE]);
+
+        char updated_dir[PATH_MAX + 1];
+        ssize_t n = read(dir_update_pipe[PIPE_READ], updated_dir, PATH_MAX);
+        if (n > 0) {
+            updated_dir[n] = '\0';
+            client->current_dir = updated_dir;
+            std::cout << BLUE << "[TCPServer::exec_request] Changed directory to " << client->current_dir << RESET << std::endl;
+        } else if (n < 0) {
+            std::cerr << RED << "[TCPServer::exec_request] Error reading from dir update pipe: " << strerror(errno) << RESET << std::endl;
+        }
+        close(dir_update_pipe[PIPE_READ]);
 
         // Write the command to the stdin pipe
-        write(stdin_pipe[PIPE_WRITE], client->command_request, client->command_request_len);
+        if (strncmp(client->command_request, "cd", 2) != 0) {
+            write(stdin_pipe[PIPE_WRITE], client->command_request, client->command_request_len);
+        }
         
         // Read output
         out_buffer = read_pipe(stdout_pipe[PIPE_READ]);
@@ -407,9 +452,22 @@ int TCPServer::exec_request(TCPClient* client) {
             tcp_send(client->client_socket, err_buffer, total_bytes_err);
             free_buffer_chain(err_buffer);
         }
+
+        int status;
+        pid_t result = waitpid(client->pid, &status, 0);
+        if (result < 0) {
+            std::cerr << RED << "[TCPServer::exec_request] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
+        } else if (WIFEXITED(status)) {
+            std::cout << GREEN << "[TCPServer::exec_request] Child process exited with status " << WEXITSTATUS(status) << RESET << std::endl;
+        } else if (WIFSIGNALED(status)) {
+            std::cout << RED << "[TCPServer::exec_request] Child process killed by signal " << WTERMSIG(status) << RESET << std::endl;
+        }
     }
 
 cleanup:
+    close(dir_update_pipe[PIPE_READ]);
+    close(dir_update_pipe[PIPE_WRITE]);
+    fail_pipe_dir_update:    
     close(stderr_pipe[PIPE_READ]);
     close(stderr_pipe[PIPE_WRITE]);
 fail_pipe_stderr:
@@ -427,23 +485,26 @@ void TCPServer::handle_shell(TCPClient* client) {
     int rc;
     char* buffer = client->command_request;
     
+    client->current_dir = "/home/" + username_; // Will be changed later on
+
     try{
         while (!shutdown_flag_) {
             tcp_send(client->client_socket, shell_prompt_.c_str(), shell_prompt_.size());
             tcp_recv(client->client_socket, buffer, MAX_BUFFER_SIZE, &bytes_read);
             if (bytes_read > 0) {
                 buffer[bytes_read] = '\0';
+                trim_newline(buffer, bytes_read);
                 std::cout << BLUE << "[TCPServer::handle_shell] Command from client " << client->ip << ": " << buffer << RESET << std::endl;
-                client->logger->log_command(buffer);
                 client->command_request_len = bytes_read;                
-                
-                if (strncmp(buffer, "exit", 4) == 0) {
-                    std::cout << GREEN << "[TCPServer::handle_shell] Client " << client->ip << " exited the shell" << RESET << std::endl;
-                    break;
-                }
+                client->logger->log_command(buffer);
 
                 // Execute the command
                 exec_request(client);
+
+                if (strncmp(buffer, "exit", 4) == 0) {
+                    std::cout << GREEN << "[TCPServer::handle_shell] Client " << client->ip << " exited" << RESET << std::endl;
+                    break;
+                }
             }
         }
     }
@@ -464,6 +525,12 @@ void TCPServer::handle_shell(TCPClient* client) {
         } else {
             std::cerr << RED << "[TCPServer::handle_shell] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
         }
+    }
+}
+
+void TCPServer::trim_newline(char* str, ssize_t& len) {
+    while (len>0 && (str[len-1] == '\n' || str[len-1] == '\r')) {
+        str[--len] = '\0';
     }
 }
 
@@ -594,6 +661,8 @@ void TCPServer::cleanup_client(TCPClient* client) {
     client->ip = "";
     client->addr_len = 0;
     client->index = -1; 
+    client->current_dir = "";
+    if (client->logger) delete client->logger; client->logger = nullptr;
 }
 
 void TCPServer::start() {

@@ -22,7 +22,7 @@
 
 #define HH_MM_SS    0b00000001
 
-#define LOG_LIMIT 3
+#define LOG_LIMIT 10
 
 class Logger{
 public:
