@@ -8,7 +8,7 @@
 
 ---
 
-## 🚀 Usage
+## Usage
 
 1. **Install Python dependencies**
    ```bash
@@ -60,7 +60,7 @@
 
 ---
 
-## 📄 License
+## License
 
 Latro Web is licensed under the [MIT License](LICENSE).
 
