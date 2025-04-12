@@ -384,14 +384,12 @@ int TCPServer::exec_request(TCPClient* client) {
                 char target_dir[PATH_MAX];
                 strncpy(target_dir, client->command_request + 3, client->command_request_len - 3);
                 if (chdir(target_dir) != 0) {
-                    std::cout << YELLOW << "[DEBUG] Fail chdir to " << target_dir << RESET << std::endl;
                     std::cerr << strerror(errno) << std::endl;
                     clean_exit(EXIT_FAILURE);
                 }
 
                 char cwd[PATH_MAX];
                 if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-                    std::cout << YELLOW << "[DEBUG] " << cwd << RESET << std::endl;
                     write(dir_update_pipe[PIPE_WRITE], cwd, strlen(cwd));
                 }
                 
@@ -538,8 +536,9 @@ void TCPServer::handle_client(TCPClient* client) {
     int rc;
     int bytes_received;
 
-    std::cout << GREEN << "[TCPServer::handle_client] Handling client " << client->ip << RESET << std::endl;
-    
+    client->event_log << GREEN << "[TCPServer::handle_client] Handling client " << client->ip << RESET << std::endl;
+    log_client(client);
+
     try {
         // Authentication phase
         tcp_send(client->client_socket, "Welcome to the Server\n");
@@ -628,42 +627,7 @@ int TCPServer::tcp_accept() {
     return 1;
 }
 
-void TCPServer::cleanup_client(TCPClient* client) {
-    if (client->client_socket >= 0) {
-        close(client->client_socket);
-    }
-    if (client->pty_master >= 0) {
-        close(client->pty_master);
-    }
-    if (client->pty_slave >=0) {
-        close(client->pty_slave);
-    }
-    
-    int* pipe = client->stdin_pipe;
-    for (int i=0; i<3; i++) {
-        for (int j=0; j<2; j++) {
-            if (pipe[j] >= 0) {
-                close(pipe[j]);
-            }
-            pipe[j] = -1;
-        }
-        pipe += 2;
-    }
 
-    client->pid = -1;
-    client->client_socket = -1;
-    client->pty_master = -1;
-    client->pty_slave = -1;
-    client->stdin_pipe[PIPE_READ] = client->stdin_pipe[PIPE_WRITE] = -1; 
-    client->stdout_pipe[PIPE_READ] = client->stdout_pipe[PIPE_WRITE] = -1;
-    client->stderr_pipe[PIPE_READ] = client->stderr_pipe[PIPE_WRITE] = -1;
-    client->authenticated = 0;
-    client->ip = "";
-    client->addr_len = 0;
-    client->index = -1; 
-    client->current_dir = "";
-    if (client->logger) delete client->logger; client->logger = nullptr;
-}
 
 void TCPServer::start() {
     int rc;
