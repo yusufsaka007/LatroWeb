@@ -6,13 +6,9 @@ TCP Server
 #define TCP_SERVER_HPP
 
 #include <iostream>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <memory>
 #include <atomic>
 #include <errno.h>
-#include <unistd.h>
-#include <sys/socket.h>
 #include <thread>
 #include <signal.h>
 #include <vector>
@@ -28,6 +24,7 @@ TCP Server
 #include "color_codes.hpp"
 #include "logger.hpp"
 #include "tcp_client.hpp"
+#include "console_logger.hpp"
 #include "common_macros.hpp"
 
 struct BufferChain {
@@ -35,6 +32,10 @@ struct BufferChain {
     size_t len;
     struct BufferChain* next;
 };
+
+extern std::mutex console_mutex;
+extern std::condition_variable console_cv;
+extern std::queue<std::string> log_queue;
 
 class TCPServer {
 public:
@@ -71,8 +72,12 @@ private:
     struct sockaddr_in server_addr_;
     std::atomic<bool> shutdown_flag_ = true;
     uint8_t max_connections_;
-    TCPClient* clients_ = nullptr;
-    std::vector<std::thread> threads_;
+    TCPClient** clients_ = nullptr; // Array of pointers to the clients
+    //std::vector<std::thread> threads_;
+    std::vector<std::unique_ptr<std::thread>> threads_;
+    std::thread console_thread_;
+    bool console_thread_active_ = false;
+    bool log_console_ = true;
     int client_count_ = 0;
     std::mutex client_mutex_;
     std::condition_variable client_cv_;

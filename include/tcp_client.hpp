@@ -5,10 +5,18 @@
 #include <queue>
 #include <mutex>
 #include <sstream>
+#include <sys/socket.h>
 #include <condition_variable>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include "logger.hpp"
 #include "common_macros.hpp"
 #include "color_codes.hpp"
+
+extern std::mutex console_mutex;
+extern std::condition_variable console_cv;
+extern std::queue<std::string> log_queue;
 
 struct TCPClient {
     pid_t pid;
@@ -30,12 +38,9 @@ struct TCPClient {
 };
 
 /*
-Modify the sstream of a client based on the color_code
-Then notify the console logger
+Modify the client then notify the console logger
 */
-void log_client(
-    TCPClient* client
-);
+void log_client(TCPClient* client);
 
 void cleanup_client(TCPClient* client);
 

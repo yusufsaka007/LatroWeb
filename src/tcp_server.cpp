@@ -79,6 +79,8 @@ int TCPServer::init() {
         std::cerr << RED << "[TCPServer::init] Error listening on socket: " << strerror(errno) << RESET << std::endl;
         return 0;
     }
+
+    threads_.resize(max_connections_);
     
     shutdown_flag_ = false;
     
@@ -179,12 +181,12 @@ void TCPServer::set_brute_force(bool allow, int min, int max) {
 
 int TCPServer::server_auth(TCPClient* client) {
     char login[MAX_USERNAME_SIZE + MAX_PASSWORD_SIZE + 2];
-    int rc;
+    ssize_t rc=0;
     try {
         do {
             tcp_send(client->client_socket, "Login (username:password): ");
             
-            tcp_recv(client->client_socket, login, MAX_USERNAME_SIZE + MAX_PASSWORD_SIZE + 2);
+            tcp_recv(client->client_socket, login, MAX_USERNAME_SIZE + MAX_PASSWORD_SIZE + 2, &rc);
             login[rc] = '\0';
             std::cout << GREEN << "[TCPServer::server_auth] Received credentials from client " << client->ip << ": " << login << RESET << std::endl;
     
@@ -428,7 +430,14 @@ int TCPServer::exec_request(TCPClient* client) {
 
         // Write the command to the stdin pipe
         if (strncmp(client->command_request, "cd", 2) != 0) {
-            write(stdin_pipe[PIPE_WRITE], client->command_request, client->command_request_len);
+            rc = write(stdin_pipe[PIPE_WRITE], client->command_request, client->command_request_len);
+            if (rc < 0) {
+                if (errno == EPIPE) {
+                    std::cerr << RED << "[TCPServer::exec_request] EPIPE: " << strerror(errno) << RESET << std::endl;
+                } else {
+                    std::cerr << RED << "[TCPServer::exec_request] Error writing to stdin pipe: " << strerror(errno) << RESET << std::endl;
+                }
+            }
         }
         
         // Read output
@@ -455,17 +464,13 @@ int TCPServer::exec_request(TCPClient* client) {
         pid_t result = waitpid(client->pid, &status, 0);
         if (result < 0) {
             std::cerr << RED << "[TCPServer::exec_request] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
-        } else if (WIFEXITED(status)) {
-            std::cout << GREEN << "[TCPServer::exec_request] Child process exited with status " << WEXITSTATUS(status) << RESET << std::endl;
-        } else if (WIFSIGNALED(status)) {
-            std::cout << RED << "[TCPServer::exec_request] Child process killed by signal " << WTERMSIG(status) << RESET << std::endl;
         }
     }
 
 cleanup:
     close(dir_update_pipe[PIPE_READ]);
     close(dir_update_pipe[PIPE_WRITE]);
-    fail_pipe_dir_update:    
+fail_pipe_dir_update:    
     close(stderr_pipe[PIPE_READ]);
     close(stderr_pipe[PIPE_WRITE]);
 fail_pipe_stderr:
@@ -507,22 +512,7 @@ void TCPServer::handle_shell(TCPClient* client) {
         }
     }
     catch(const std::exception& e) { // Catch the exception from tcp_recv and tcp_send
-        std::cerr << RED << e.what() << RESET << std::endl;
-    }
-
-    if (client->pid > 0) {
-        int status;
-        pid_t result = waitpid(client->pid, &status, 0);
-        if (result == 0) {
-            // Child is still running, send SIGKILL
-            kill(client->pid, SIGKILL);
-            waitpid(client->pid, NULL, 0);
-        } else if (result > 0) {
-            // Child has already terminated, no need to send SIGKILL
-            std::cout << GREEN << "[TCPServer::handle_shell] Child process terminated normally" << RESET << std::endl;
-        } else {
-            std::cerr << RED << "[TCPServer::handle_shell] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
-        }
+        std::cerr <<  RED << "[handle_shell] " << e.what() << RESET << std::endl;
     }
 }
 
@@ -544,13 +534,13 @@ void TCPServer::handle_client(TCPClient* client) {
         tcp_send(client->client_socket, "Welcome to the Server\n");
         rc = server_auth(client);
         if (rc <= 0) goto cleanup;
-
-        // Shell phase
-        handle_shell(client);
     }
     catch(const std::exception& e) {
         std::cerr << RED << e.what() << RESET << std::endl;
     }   
+
+    // Shell phase
+    handle_shell(client);
 
 cleanup:
     std::cout << YELLOW << "[TCPServer::handle_client] Cleaning up the client " << client->ip << RESET << std::endl;
@@ -559,15 +549,15 @@ cleanup:
         waitpid(client->pid, NULL, 0);
     }
 
-    cleanup_client(client);
-
     {
         std::lock_guard<std::mutex> lock(client_mutex_);
+        clients_[client->index] = nullptr; // Free the slot
         client_count_--;
-        client_cv_.notify_one();
+        client_cv_.notify_one(); // Notify the main thread
     }
     
-    delete client;
+    cleanup_client(client);
+
     return;
 }
 
@@ -581,7 +571,12 @@ int TCPServer::tcp_accept() {
     client_fd = accept(server_fd_, (struct sockaddr*) &client_addr, &client_addr_len);
     
     if (client_fd < 0) {
-        std::cerr << RED << "[TCPServer::tcp_accept] Error accepting connection: " << strerror(errno) << RESET << std::endl;
+        if (errno == EINTR) {
+            std::cerr << RED << "[TCPServer::tcp_accept] Accept interrupted by signal" << RESET << std::endl;
+            if(!shutdown_flag_) shutdown_flag_ = true;
+        } else {
+            std::cerr << RED << "[TCPServer::tcp_accept] Error accepting connection: " << strerror(errno) << RESET << std::endl;
+        }
         return 0;
     }
 
@@ -593,18 +588,19 @@ int TCPServer::tcp_accept() {
     {
         std::lock_guard<std::mutex> lock(client_mutex_);
         for (int i=0; i<max_connections_; i++) {
-            if (clients_[i].client_socket == -1){
+            if (clients_[i] == nullptr){ // Free slot found
+                slot_found = true;
+                std::cout << GREEN << "[TCPServer::tcp_accept] Accepted connection from " << inet_ntoa(client_addr.sin_addr) << RESET << std::endl;
                 client = new TCPClient();
                 client->client_socket = client_fd;
                 client->addr_len = client_addr_len;
                 client->ip = inet_ntoa(client_addr.sin_addr);
                 client->logger = new Logger(client->ip.c_str());
                 client->index = i;
-                clients_[i] = *client;
-                slot_found = true;
-                std::cout << GREEN << "[TCPServer::tcp_accept] Accepted connection from " << inet_ntoa(client_addr.sin_addr) << RESET << std::endl;
+                clients_[i] = client; // Copy the pointer to the client
                 client_count_++;
                 client_cv_.notify_one();
+
                 break;
             }
         }
@@ -621,8 +617,20 @@ int TCPServer::tcp_accept() {
         close(client_fd);
         return 0;
     }
+
+    //threads_.emplace_back(&TCPServer::handle_client, this, client);
     
-    threads_.emplace_back(&TCPServer::handle_client, this, client);
+    if (threads_[client->index] && threads_[client->index]->joinable()) {
+        threads_[client->index]->join(); // or .detach(), depending on your design
+    }
+    
+    //threads_[client->index] = std::thread(&TCPServer::handle_client, this, client);
+    if (log_console_ && !console_thread_active_) {
+        // Initialize the console logger
+        console_thread_ = std::thread(log_console, std::ref(shutdown_flag_));
+        console_thread_active_ = true;
+    }
+    threads_[client->index] = std::make_unique<std::thread>(&TCPServer::handle_client, this, client);
     
     return 1;
 }
@@ -631,10 +639,12 @@ int TCPServer::tcp_accept() {
 
 void TCPServer::start() {
     int rc;
-    clients_ = new TCPClient[max_connections_]; 
+    clients_ = new TCPClient*[max_connections_]; 
     for (int i=0; i<max_connections_; i++) {
-        cleanup_client(&clients_[i]); 
+        clients_[i] = nullptr; 
     }
+    
+
     while (!shutdown_flag_) {
         std::cout << GREEN << "[TCPServer::start] Waiting for client connection" << RESET << std::endl;
 
@@ -647,6 +657,7 @@ void TCPServer::start() {
         lock.unlock();
         rc = tcp_accept();
         if (rc < 0) continue;
+     
         #else 
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
@@ -661,24 +672,33 @@ void TCPServer::start() {
 
 void TCPServer::stop() {
     shutdown_flag_ = true;
-    client_cv_.notify_all();
+
+    std::cout << MAGENTA << "[TCPServer::stop] Stopping the server" << RESET << std::endl;
+
     #ifdef WITH_THREADS
+    client_cv_.notify_all();
+    console_cv.notify_one();
     for (auto& thread : threads_) {
-        if (thread.joinable()) {
-            thread.join();
+        if (thread && thread->joinable()) {
+            thread->join();
         }
     }
+    if (console_thread_.joinable()) {
+        console_thread_.join();
+    }
+
     #endif
 }
 
 int TCPServer::cleanup() {
-    std::cout << YELLOW << "[TCPServer::stop] Stopping the server" << RESET << std::endl;
+    std::cout << YELLOW << "[TCPServer::cleanup] Cleaning up the server" << RESET << std::endl;
+
     if (server_fd_ > 0) {
         close(server_fd_);
     }
 
     for (int i=0; i<max_connections_; i++) {
-        cleanup_client(&clients_[i]);
+        cleanup_client(clients_[i]);
     }
 
     if (clients_) {

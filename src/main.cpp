@@ -19,6 +19,8 @@ static void temp_sigterm_handler(int signum) {
 }
 
 int main(int argc, char* argv[]) {   
+    signal(SIGPIPE, SIG_IGN);
+
     std::ifstream file = js::get_file();
     if(!file.is_open()) {
         std::cerr << RED << "[main] File not found or bad file: " << JSON_FILE << RESET << std::endl;
