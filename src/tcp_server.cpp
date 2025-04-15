@@ -305,33 +305,42 @@ int TCPServer::exec_request(TCPClient* client) {
     int rc;
     int exec_result;
 
-    rc = pipe(stdin_pipe);
+    rc = pipe2(stdin_pipe, O_CLOEXEC);
     if (rc < 0) {
         std::cerr << RED << "[TCPServer::exec_request] Error creating stdin pipe: " << strerror(errno) << RESET << std::endl;
         goto fail_pipe_stdin;
     }
-    rc = pipe(stdout_pipe);
+
+    rc = pipe2(stdout_pipe, O_CLOEXEC);
     if (rc < 0) {
         std::cerr << RED << "[TCPServer::exec_request] Error creating stdout pipe: " << strerror(errno) << RESET << std::endl;
         goto fail_pipe_stdout;
     }
-    rc = pipe(stderr_pipe);
+    
+    rc = pipe2(stderr_pipe, O_CLOEXEC);
     if (rc < 0) {
         std::cerr << RED << "[TCPServer::exec_request] Error creating stderr pipe: " << strerror(errno) << RESET << std::endl;
         goto fail_pipe_stderr;
     }
 
-    rc = pipe(dir_update_pipe);
+    rc = pipe2(dir_update_pipe, O_CLOEXEC);
     if (rc < 0) {
         std::cerr << RED << "[TCPServer::exec_request] Error creating dir update pipe: " << strerror(errno) << RESET << std::endl;
         goto fail_pipe_dir_update;
     }
+
+    /*std::cout << "Open FDs before fork (in client): " << client->index << std::endl;
+    for (int fd = 0; fd < 1024; fd++) {
+        if (fcntl(fd, F_GETFD) != -1)
+            std::cout << "  FD: " << fd << " is open\n";
+    }*/
 
     client->pid = fork();
     if (client->pid < 0) {
         std::cerr << RED << "[TCPServer::exec_request] Fork failed: " << strerror(errno) << RESET << std::endl;
         goto cleanup;
     }
+
     if (client->pid == 0) {
         // Child process
         client->logger = nullptr; // Prevent access
@@ -439,13 +448,16 @@ int TCPServer::exec_request(TCPClient* client) {
                 }
             }
         }
-        
+        close(stdin_pipe[PIPE_WRITE]);
+
         // Read output
         out_buffer = read_pipe(stdout_pipe[PIPE_READ]);
-
+        close(stdout_pipe[PIPE_READ]);
+        
         // Read error
         err_buffer = read_pipe(stderr_pipe[PIPE_READ]);
-    
+        close(stderr_pipe[PIPE_READ]);
+
         // Send output to the attacker
         if (out_buffer) {
             size_t total_bytes_out = get_total_bytes(out_buffer);            
@@ -464,7 +476,9 @@ int TCPServer::exec_request(TCPClient* client) {
         pid_t result = waitpid(client->pid, &status, 0);
         if (result < 0) {
             std::cerr << RED << "[TCPServer::exec_request] Error waiting for child process: " << strerror(errno) << RESET << std::endl;
-        }
+        }  
+        std::cout << MAGENTA << "[TCPServer::exec_request] Child process exited with status: " << WEXITSTATUS(status) << RESET << std::endl;
+        return 1;
     }
 
 cleanup:
@@ -501,13 +515,15 @@ void TCPServer::handle_shell(TCPClient* client) {
                 client->command_request_len = bytes_read;                
                 client->logger->log_command(buffer);
 
-                // Execute the command
-                exec_request(client);
-
                 if (strncmp(buffer, "exit", 4) == 0) {
                     std::cout << GREEN << "[TCPServer::handle_shell] Client " << client->ip << " exited" << RESET << std::endl;
+                    tcp_send(client->client_socket, "Goodbye\n");
                     break;
                 }
+                else {
+                    // Execute the command
+                    exec_request(client);
+                }               
             }
         }
     }

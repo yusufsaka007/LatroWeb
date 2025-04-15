@@ -21,8 +21,6 @@ extern std::queue<std::string> log_queue;
 struct TCPClient {
     pid_t pid;
     int client_socket;
-    int pty_master;
-    int pty_slave;
     int stdin_pipe[2];
     int stdout_pipe[2];
     int stderr_pipe[2];

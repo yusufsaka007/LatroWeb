@@ -24,14 +24,8 @@ void cleanup_client(TCPClient* client) {
     if (client->client_socket >= 0) {
         close(client->client_socket);
     }
-    if (client->pty_master >= 0) {
-        close(client->pty_master);
-    }
-    if (client->pty_slave >=0) {
-        close(client->pty_slave);
-    }
     
-    int* pipe = client->stdin_pipe;
+    /*int* pipe = client->stdin_pipe;
     for (int i=0; i<3; i++) {
         for (int j=0; j<2; j++) {
             if (pipe[j] >= 0) {
@@ -40,7 +34,7 @@ void cleanup_client(TCPClient* client) {
             }
         }
         pipe += 2;
-    }
+    }*/
 
     /*
     close(client->stdin_pipe[PIPE_READ]);
@@ -53,8 +47,6 @@ void cleanup_client(TCPClient* client) {
 
     client->pid = -1;
     client->client_socket = -1;
-    client->pty_master = -1;
-    client->pty_slave = -1;
     
     client->stdin_pipe[PIPE_READ] = client->stdin_pipe[PIPE_WRITE] = -1; 
     client->stdout_pipe[PIPE_READ] = client->stdout_pipe[PIPE_WRITE] = -1;
